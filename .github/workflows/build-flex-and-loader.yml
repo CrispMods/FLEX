@@ -22,29 +22,28 @@ jobs:
           static void presentExplorerWithManager(id mgr) {
               if (!mgr) return;
 
-              // define selector list here, not inside block
-              SEL cands[] = {
-                  NSSelectorFromString(@"showExplorer"),
-                  NSSelectorFromString(@"show"),
-                  NSSelectorFromString(@"open"),
-                  NSSelectorFromString(@"presentExplorer"),
-              };
-              int candCount = sizeof(cands)/sizeof(cands[0]);
+              // Use NSStrings, not a C array of SEL
+              NSArray<NSString *> *selectorNames = @[
+                  @"showExplorer",
+                  @"show",
+                  @"open",
+                  @"presentExplorer",
+              ];
 
               dispatch_async(dispatch_get_main_queue(), ^{
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                                  dispatch_get_main_queue(), ^{
-                      for (int i = 0; i < candCount; i++) {
-                          SEL sel = cands[i];
+                      for (NSString *name in selectorNames) {
+                          SEL sel = NSSelectorFromString(name);
                           if ([mgr respondsToSelector:sel]) {
                               @try {
                                   #pragma clang diagnostic push
                                   #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                                   [mgr performSelector:sel];
                                   #pragma clang diagnostic pop
-                                  NSLog(@"[Loader] invoked %@", NSStringFromSelector(sel));
+                                  NSLog(@"[Loader] invoked %@", name);
                               } @catch (NSException *e) {
-                                  NSLog(@"[Loader] exception: %@", e);
+                                  NSLog(@"[Loader] exception calling %@: %@", name, e);
                               }
                               return;
                           }
@@ -88,7 +87,7 @@ jobs:
           __attribute__((constructor))
           static void loader_constructor() {
               dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                  sleep(1);
+                  sleep(1); // let app init
                   loadAndPresent();
               });
           }
