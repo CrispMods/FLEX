@@ -1,0 +1,60 @@
+name: Build FLEX framework + loader (arm64 iOS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout FLEX repo
+        uses: actions/checkout@v4
+        with:
+          repository: FLEXTool/FLEX
+          path: flex-src
+
+      - name: Checkout this repo (for loader source)
+        uses: actions/checkout@v4
+        with:
+          path: loader-src
+
+      - name: Show Xcode / SDK
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build FLEX framework for device (Release)
+        working-directory: ./flex-src
+        run: |
+          set -e
+          xcodebuild -project FLEX.xcodeproj \
+            -scheme "FLEX" \
+            -configuration Release \
+            -sdk iphoneos \
+            BUILD_DIR=build BUILD_ROOT=build \
+            clean build
+          ls -la build/Release-iphoneos || true
+
+      - name: Build loader dylib (Loader.dylib)
+        working-directory: ./loader-src
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          clang -arch arm64 -isysroot "$SDK" -ObjC -fobjc-arc -dynamiclib loader.m -o Loader.dylib
+          file Loader.dylib || true
+          lipo -info Loader.dylib || true
+
+      - name: Package artifacts
+        run: |
+          mkdir -p out
+          if [ -d "flex-src/build/Release-iphoneos/FLEX.framework" ]; then
+            cp -R flex-src/build/Release-iphoneos/FLEX.framework out/ || true
+          fi
+          cp loader-src/Loader.dylib out/ || true
+          ls -la out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flex-and-loader
+          path: out
