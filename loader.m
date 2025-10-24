@@ -16,9 +16,9 @@ typedef int32_t (*t_il2cpp_string_length)(void* il2cppStr); // safer than wcslen
 static void* sym(const char* s) {
     void *p = dlsym(RTLD_DEFAULT, s);
     if (!p) {
-        // In some builds you must dlopen UnityFramework first
-        void *hf = dlopen("@rpath/UnityFramework.framework/UnityFramework", RTLD_NOW);
-        if (!hf) hf = dlopen("/System/Library/Frameworks/UnityFramework.framework/UnityFramework", RTLD_NOW);
+        // try to ensure UnityFramework is loaded
+        void *hf = dlopen("@rpath/UnityFramework.framework/UnityFramework", RTLD_NOW | RTLD_LOCAL);
+        if (!hf) hf = dlopen("/System/Library/Frameworks/UnityFramework.framework/UnityFramework", RTLD_NOW | RTLD_LOCAL);
         p = dlsym(RTLD_DEFAULT, s);
     }
     return p;
@@ -46,7 +46,6 @@ static BOOL logAuthToken_once(void) {
     for (size_t i = 0; i < count; i++) {
         void* img = il2cpp_assembly_get_image((void*)assemblies[i]);
         const char* name = il2cpp_image_get_name(img);
-        // Names vary: "Nakama.dll" or "Nakama"
         if (name && (strstr(name, "Nakama.dll") || strstr(name, "Nakama"))) { nakamaImage = img; break; }
     }
     if (!nakamaImage) { NSLog(@"[Loader] Nakama image not loaded yet"); return NO; }
@@ -86,7 +85,8 @@ static BOOL logAuthToken_once(void) {
 // Call this after FLEX/explorer shows; retry because login/session may appear later
 static void try_logAuthToken_with_retries(void) {
     __block int attempts = 0;
-    void (^tick)(void) = ^{
+    __block void (^tick)(void);
+    tick = ^{
         if (logAuthToken_once()) return;
         attempts++;
         if (attempts < 10) { // ~10 tries x 1s
@@ -98,4 +98,106 @@ static void try_logAuthToken_with_retries(void) {
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), tick);
+}
+
+// --- FLEX presentation helpers ---
+static void presentExplorerWithManager(id mgr) {
+    if (!mgr) return;
+    NSArray<NSString *> *noArg = @[@"showExplorer", @"toggleExplorer", @"presentExplorer", @"show"];
+    NSArray<NSString *> *oneArg = @[@"showExplorerFromRootViewController:", @"presentExplorerAnimated:"];
+
+    for (NSString *name in noArg) {
+        SEL sel = NSSelectorFromString(name);
+        if (mgr && [mgr respondsToSelector:sel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [mgr performSelector:sel];
+#pragma clang diagnostic pop
+            NSLog(@"[Loader] invoked %@", name);
+            return;
+        }
+    }
+    // try presenters that take an argument
+    UIWindow *win = UIApplication.sharedApplication.keyWindow ?: UIApplication.sharedApplication.windows.firstObject;
+    UIViewController *root = win.rootViewController ?: [UIViewController new];
+
+    for (NSString *name in oneArg) {
+        SEL sel = NSSelectorFromString(name);
+        if (mgr && [mgr respondsToSelector:sel]) {
+            id arg = root;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [mgr performSelector:sel withObject:arg];
+#pragma clang diagnostic pop
+            NSLog(@"[Loader] invoked %@ with root", name);
+            return;
+        }
+    }
+    NSLog(@"[Loader] could not find FLEX presenter");
+}
+
+static void tryLoadAndPresentFLEX(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray<NSString *> *paths = @[
+            [[NSBundle mainBundle] pathForResource:@"FLEX" ofType:@"framework" inDirectory:@"Frameworks"],
+            [NSString stringWithFormat:@"%@/Frameworks/FLEX.framework/FLEX", [[NSBundle mainBundle] bundlePath]],
+            // fallback additional locations if needed
+            @"/Library/Frameworks/FLEX.framework/FLEX"
+        ];
+
+        for (NSString *p in paths) {
+            if (!p) continue;
+            if (![[NSFileManager defaultManager] fileExistsAtPath:p]) continue;
+            void *h = dlopen(p.UTF8String, RTLD_NOW | RTLD_LOCAL);
+            if (h) {
+                NSLog(@"[Loader] dlopen OK: %@", p);
+                Class FlexMgr = NSClassFromString(@"FLEXManager");
+                if (FlexMgr && [FlexMgr respondsToSelector:@selector(sharedManager)]) {
+                    id mgr = [FlexMgr performSelector:@selector(sharedManager)];
+                    presentExplorerWithManager(mgr);
+                    // start auth token read retries after presenting FLEX
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        try_logAuthToken_with_retries();
+                    });
+                    return;
+                }
+            } else {
+                NSLog(@"[Loader] dlopen failed for %@: %s", p, dlerror());
+            }
+        }
+
+        // If framework not found via bundle, try loading dylib name directly from Frameworks path
+        NSString *alt = [NSString stringWithFormat:@"%@/Frameworks/Loader.dylib", [[NSBundle mainBundle] bundlePath]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:alt]) {
+            void *h2 = dlopen(alt.UTF8String, RTLD_NOW | RTLD_LOCAL);
+            if (h2) {
+                NSLog(@"[Loader] dlopen OK alt: %@", alt);
+                Class FlexMgr = NSClassFromString(@"FLEXManager");
+                if (FlexMgr && [FlexMgr respondsToSelector:@selector(sharedManager)]) {
+                    id mgr = [FlexMgr performSelector:@selector(sharedManager)];
+                    presentExplorerWithManager(mgr);
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        try_logAuthToken_with_retries();
+                    });
+                    return;
+                }
+            }
+        }
+
+        NSLog(@"[Loader] no FLEX framework found in expected locations");
+    });
+}
+
+__attribute__((constructor))
+static void loader_constructor() {
+    // run in background, present FLEX on main thread
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // small startup delay
+        sleep(1);
+        tryLoadAndPresentFLEX();
+        // also schedule a late attempt in case FLEX appears later
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            tryLogAuth:; // no-op placeholder to indicate late attempt – removed, token retries are scheduled after present
+        });
+    });
 }
