@@ -21,20 +21,31 @@ jobs:
 
           static void presentExplorerWithManager(id mgr) {
               if (!mgr) return;
+
+              // define selector list here, not inside block
               SEL cands[] = {
                   NSSelectorFromString(@"showExplorer"),
                   NSSelectorFromString(@"show"),
                   NSSelectorFromString(@"open"),
                   NSSelectorFromString(@"presentExplorer"),
               };
+              int candCount = sizeof(cands)/sizeof(cands[0]);
+
               dispatch_async(dispatch_get_main_queue(), ^{
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                                  dispatch_get_main_queue(), ^{
-                      for (int i = 0; i < sizeof(cands)/sizeof(cands[0]); ++i) {
+                      for (int i = 0; i < candCount; i++) {
                           SEL sel = cands[i];
                           if ([mgr respondsToSelector:sel]) {
-                              @try { [mgr performSelector:sel]; NSLog(@"[Loader] invoked %@", NSStringFromSelector(sel)); }
-                              @catch (NSException *e) { NSLog(@"[Loader] exception: %@", e); }
+                              @try {
+                                  #pragma clang diagnostic push
+                                  #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                  [mgr performSelector:sel];
+                                  #pragma clang diagnostic pop
+                                  NSLog(@"[Loader] invoked %@", NSStringFromSelector(sel));
+                              } @catch (NSException *e) {
+                                  NSLog(@"[Loader] exception: %@", e);
+                              }
                               return;
                           }
                       }
@@ -44,9 +55,15 @@ jobs:
           }
 
           static void tryDlopenPath(NSString *path) {
-              if (![[NSFileManager defaultManager] fileExistsAtPath:path]) { NSLog(@"[Loader] not found: %@", path); return; }
+              if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                  NSLog(@"[Loader] not found: %@", path);
+                  return;
+              }
               void *h = dlopen(path.UTF8String, RTLD_NOW | RTLD_LOCAL);
-              if (!h) { NSLog(@"[Loader] dlopen failed for %@: %s", path, dlerror()); return; }
+              if (!h) {
+                  NSLog(@"[Loader] dlopen failed for %@: %s", path, dlerror());
+                  return;
+              }
               NSLog(@"[Loader] dlopen OK: %@", path);
 
               Class FlexMgr = NSClassFromString(@"FLEXManager");
@@ -71,7 +88,7 @@ jobs:
           __attribute__((constructor))
           static void loader_constructor() {
               dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                  sleep(1); // let app init
+                  sleep(1);
                   loadAndPresent();
               });
           }
@@ -79,7 +96,6 @@ jobs:
 
       - name: Show toolchain
         run: |
-          xcode-select -p
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
