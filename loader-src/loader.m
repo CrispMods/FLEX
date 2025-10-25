@@ -189,11 +189,12 @@ static void tryLoadAndPresentFLEX(void) {
                 id mgr = [FlexMgr performSelector:@selector(sharedManager)];
 #pragma clang diagnostic pop
                 presentExplorerWithManager(mgr);
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
-               dispatch_get_main_queue(), ^{
-    try_logAuthToken_with_retries();
-});
 
+                // FIX: dispatch_after expects a block, not a function pointer.
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
+                               dispatch_get_main_queue(), ^{
+                    try_logAuthToken_with_retries();
+                });
                 return;
             }
             NSLog(@"[Loader v2] FLEXManager not found after dlopen");
