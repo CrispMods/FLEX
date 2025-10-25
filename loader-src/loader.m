@@ -61,110 +61,86 @@ static UIWindow *LF_mainWindow(void) {
 static BOOL logAuthToken_once(void) {
     NSLog(@"[Loader v3] ===== logAuthToken_once() =====");
 
-    t_il2cpp_domain_get                 il2cpp_domain_get                 = (t_il2cpp_domain_get)                sym("il2cpp_domain_get");
-    t_il2cpp_domain_get_assemblies      il2cpp_domain_get_assemblies      = (t_il2cpp_domain_get_assemblies)     sym("il2cpp_domain_get_assemblies");
-    t_il2cpp_assembly_get_image         il2cpp_assembly_get_image         = (t_il2cpp_assembly_get_image)        sym("il2cpp_assembly_get_image");
-    t_il2cpp_image_get_name             il2cpp_image_get_name             = (t_il2cpp_image_get_name)            sym("il2cpp_image_get_name");
-    t_il2cpp_class_from_name            il2cpp_class_from_name            = (t_il2cpp_class_from_name)           sym("il2cpp_class_from_name");
-    t_il2cpp_class_get_method_from_name il2cpp_class_get_method_from_name = (t_il2cpp_class_get_method_from_name)sym("il2cpp_class_get_method_from_name");
-    t_il2cpp_runtime_invoke             il2cpp_runtime_invoke             = (t_il2cpp_runtime_invoke)            sym("il2cpp_runtime_invoke");
-    t_il2cpp_string_chars               il2cpp_string_chars               = (t_il2cpp_string_chars)              sym("il2cpp_string_chars");
-    t_il2cpp_string_length              il2cpp_string_length              = (t_il2cpp_string_length)             sym("il2cpp_string_length");
-    t_il2cpp_thread_attach              il2cpp_thread_attach              = (t_il2cpp_thread_attach)             sym("il2cpp_thread_attach");
-    t_il2cpp_thread_detach              il2cpp_thread_detach              = (t_il2cpp_thread_detach)             sym("il2cpp_thread_detach");
-    t_il2cpp_domain_assembly_open       il2cpp_domain_assembly_open       = (t_il2cpp_domain_assembly_open)      sym("il2cpp_domain_assembly_open"); // optional
+    t_il2cpp_domain_get  il2cpp_domain_get  = (t_il2cpp_domain_get) sym("il2cpp_domain_get");
+    t_il2cpp_domain_get_assemblies il2cpp_domain_get_assemblies = (t_il2cpp_domain_get_assemblies) sym("il2cpp_domain_get_assemblies");
+    t_il2cpp_assembly_get_image   il2cpp_assembly_get_image   = (t_il2cpp_assembly_get_image) sym("il2cpp_assembly_get_image");
+    t_il2cpp_image_get_name       il2cpp_image_get_name       = (t_il2cpp_image_get_name) sym("il2cpp_image_get_name");
+    t_il2cpp_class_from_name      il2cpp_class_from_name      = (t_il2cpp_class_from_name) sym("il2cpp_class_from_name");
+    t_il2cpp_class_get_method_from_name mget = (t_il2cpp_class_get_method_from_name) sym("il2cpp_class_get_method_from_name");
+    t_il2cpp_runtime_invoke       il2cpp_runtime_invoke       = (t_il2cpp_runtime_invoke) sym("il2cpp_runtime_invoke");
+    t_il2cpp_string_chars         il2cpp_string_chars         = (t_il2cpp_string_chars) sym("il2cpp_string_chars");
+    t_il2cpp_string_length        il2cpp_string_length        = (t_il2cpp_string_length) sym("il2cpp_string_length");
+    t_il2cpp_thread_attach        il2cpp_thread_attach        = (t_il2cpp_thread_attach) sym("il2cpp_thread_attach");
+    t_il2cpp_thread_detach        il2cpp_thread_detach        = (t_il2cpp_thread_detach) sym("il2cpp_thread_detach");
 
-    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies) {
-        NSLog(@"[Loader v3] missing core IL2CPP symbols");
-        return NO;
-    }
+    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies) { NSLog(@"[Loader v3] missing core IL2CPP symbols"); return NO; }
 
     void* domain = il2cpp_domain_get();
     if (!domain) { NSLog(@"[Loader v3] il2cpp_domain_get() NULL"); return NO; }
 
-    // attach this thread to IL2CPP VM (required)
-    void* attached = NULL;
-    if (il2cpp_thread_attach) {
-        attached = il2cpp_thread_attach(domain);
-        NSLog(@"[Loader v3] il2cpp_thread_attach -> %p", attached);
-    }
+    void* tls = NULL;
+    if (il2cpp_thread_attach) tls = il2cpp_thread_attach(domain);
 
     const void** assemblies = NULL; size_t count = 0;
     il2cpp_domain_get_assemblies(domain, &assemblies, &count);
-    NSLog(@"[Loader v3] assemblies count = %zu ptr=%p", count, assemblies);
-
-    // try to force-load Nakama if list is empty in this frame
-    if ((count == 0 || !assemblies) && il2cpp_domain_assembly_open) {
-        void* a = il2cpp_domain_assembly_open(domain, "Nakama.dll");
-        NSLog(@"[Loader v3] domain_assembly_open(\"Nakama.dll\") -> %p", a);
-        il2cpp_domain_get_assemblies(domain, &assemblies, &count);
-        NSLog(@"[Loader v3] assemblies count after open = %zu", count);
-    }
-
-    if (!assemblies || count == 0) {
-        NSLog(@"[Loader v3] no assemblies yet");
-        if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached);
-        return NO;
+    NSLog(@"[Loader v3] assemblies count = %zu", count);
+    if (!assemblies || count == 0) { 
+        NSLog(@"[Loader v3] no assemblies yet (will retry)");
+        if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls);
+        return NO; 
     }
 
     for (size_t i = 0; i < count && i < 12; i++) {
         void* img = il2cpp_assembly_get_image((void*)assemblies[i]);
         const char* nm = img ? il2cpp_image_get_name(img) : "(null)";
-        NSLog(@"[Loader v3] asm[%zu] image=%p name=%s", i, img, nm ?: "(null)");
+        NSLog(@"[Loader v3] asm[%zu] %s", i, nm ?: "(null)");
     }
 
-    // find Nakama image
+    // Find Nakama image
     void* nakamaImage = NULL;
     for (size_t i = 0; i < count; i++) {
         void* img = il2cpp_assembly_get_image((void*)assemblies[i]);
         const char* name = img ? il2cpp_image_get_name(img) : NULL;
-        if (name && (strstr(name, "Nakama.dll") || strstr(name, "Nakama"))) {
-            nakamaImage = img;
-            NSLog(@"[Loader v3] found image: %s", name);
-            break;
-        }
+        if (name && (strstr(name, "Nakama.dll") || strstr(name, "Nakama"))) { nakamaImage = img; break; }
     }
-    if (!nakamaImage) { NSLog(@"[Loader v3] Nakama image not loaded yet"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    if (!nakamaImage) { 
+        NSLog(@"[Loader v3] Nakama image not present yet (will retry)");
+        if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls);
+        return NO; 
+    }
 
-    // Client.get_Instance()
     void* clientKlass = il2cpp_class_from_name(nakamaImage, "Nakama", "Client");
-    if (!clientKlass) { NSLog(@"[Loader v3] Nakama.Client not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
-    void* m_getInstance = il2cpp_class_get_method_from_name(clientKlass, "get_Instance", 0);
-    if (!m_getInstance){ NSLog(@"[Loader v3] get_Instance not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    if (!clientKlass) { NSLog(@"[Loader v3] Nakama.Client not found"); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
+
+    void* m_getInstance = mget(clientKlass, "get_Instance", 0);
+    if (!m_getInstance){ NSLog(@"[Loader v3] get_Instance not found"); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
     void* exc = NULL;
     void* clientSingleton = il2cpp_runtime_invoke(m_getInstance, NULL, NULL, &exc);
-    if (!clientSingleton){ NSLog(@"[Loader v3] Client.Instance NULL (exc=%p)", exc); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    if (!clientSingleton){ NSLog(@"[Loader v3] Client.Instance NULL (exc=%p)", exc); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
 
-    // Client.get_Session()
-    void* m_getSession = il2cpp_class_get_method_from_name(clientKlass, "get_Session", 0);
-    if (!m_getSession){ NSLog(@"[Loader v3] get_Session not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    void* m_getSession = mget(clientKlass, "get_Session", 0);
+    if (!m_getSession){ NSLog(@"[Loader v3] get_Session not found"); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
     void* sessionObj = il2cpp_runtime_invoke(m_getSession, clientSingleton, NULL, &exc);
-    if (!sessionObj){ NSLog(@"[Loader v3] Session NULL (exc=%p)", exc); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    if (!sessionObj){ NSLog(@"[Loader v3] Session NULL (exc=%p)", exc); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
 
-    // Session.get_AuthToken()
     void* sessionKlass = il2cpp_class_from_name(nakamaImage, "Nakama", "Session");
-    if (!sessionKlass){ NSLog(@"[Loader v3] Nakama.Session not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
-    void* m_getAuth = il2cpp_class_get_method_from_name(sessionKlass, "get_AuthToken", 0);
-    if (!m_getAuth){ NSLog(@"[Loader v3] get_AuthToken not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    if (!sessionKlass){ NSLog(@"[Loader v3] Nakama.Session not found"); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
+    void* m_getAuth = mget(sessionKlass, "get_AuthToken", 0);
+    if (!m_getAuth){ NSLog(@"[Loader v3] get_AuthToken not found"); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
     void* tokenStr = il2cpp_runtime_invoke(m_getAuth, sessionObj, NULL, &exc);
-    if (!tokenStr){ NSLog(@"[Loader v3] AuthToken returned NULL (exc=%p)", exc); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    if (!tokenStr){ NSLog(@"[Loader v3] AuthToken returned NULL (exc=%p)", exc); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
 
-    if (!il2cpp_string_chars || !il2cpp_string_length) {
-        NSLog(@"[Loader v3] il2cpp_string_* missing");
-        if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached);
-        return NO;
-    }
-    const uint16_t* w = il2cpp_string_chars(tokenStr);
-    int32_t len = il2cpp_string_length(tokenStr);
-    NSLog(@"[Loader v3] token Il2CppString len=%d chars_ptr=%p", len, w);
-    if (!w || len <= 0) { NSLog(@"[Loader v3] token empty"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
+    const uint16_t* w = il2cpp_string_chars ? il2cpp_string_chars(tokenStr) : NULL;
+    int32_t len = il2cpp_string_length ? il2cpp_string_length(tokenStr) : 0;
+    if (!w || len <= 0) { NSLog(@"[Loader v3] token empty"); if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls); return NO; }
 
     NSString *ns = [NSString stringWithCharacters:(unichar*)w length:(NSUInteger)len];
     NSLog(@"[Loader v3] Nakama Session AuthToken = %@", ns);
 
-    if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached);
+    if (il2cpp_thread_detach && tls) il2cpp_thread_detach(tls);
     return YES;
 }
+
 
 static void try_logAuthToken_with_retries(void) {
     __block int attempts = 0;
