@@ -11,7 +11,7 @@ jobs:
           repository: FLEXTool/FLEX
           path: flex-src
 
-      - name: Create loader.m on runner (diagnostic v2)
+      - name: Create loader.m (fresh content)
         run: |
           mkdir -p loader-src
           cat > loader-src/loader.m <<'EOF'
@@ -39,6 +39,25 @@ jobs:
               }
               if (!p) NSLog(@"[Loader v2] dlsym('%s') still NULL", s);
               return p;
+          }
+
+          static UIWindow *LF_mainWindow(void) {
+              if (@available(iOS 13.0, *)) {
+                  for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                      if (scene.activationState == UISceneActivationStateForegroundActive &&
+                          [scene isKindOfClass:[UIWindowScene class]]) {
+                          for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                              if (w.isKeyWindow) return w;
+                          }
+                      }
+                  }
+                  return UIApplication.sharedApplication.windows.firstObject;
+              } else {
+          #pragma clang diagnostic push
+          #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                  return UIApplication.sharedApplication.keyWindow ?: UIApplication.sharedApplication.windows.firstObject;
+          #pragma clang diagnostic pop
+              }
           }
 
           static BOOL logAuthToken_once(void) {
@@ -128,7 +147,7 @@ jobs:
                   }
               };
               dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                             dispatch_get_main_queue(), tick);
+                             dispatch_get_main_queue(), ^{ tick(); });
           }
 
           static void presentExplorerWithManager(id mgr) {
@@ -139,23 +158,23 @@ jobs:
               for (NSString *name in noArg) {
                   SEL sel = NSSelectorFromString(name);
                   if ([mgr respondsToSelector:sel]) {
-                      #pragma clang diagnostic push
-                      #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+          #pragma clang diagnostic push
+          #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                       [mgr performSelector:sel];
-                      #pragma clang diagnostic pop
+          #pragma clang diagnostic pop
                       NSLog(@"[Loader v2] invoked %@", name);
                       return;
                   }
               }
-              UIWindow *win = UIApplication.sharedApplication.keyWindow ?: UIApplication.sharedApplication.windows.firstObject;
+              UIWindow *win = LF_mainWindow();
               UIViewController *root = win.rootViewController ?: [UIViewController new];
               for (NSString *name in oneArg) {
                   SEL sel = NSSelectorFromString(name);
                   if ([mgr respondsToSelector:sel]) {
-                      #pragma clang diagnostic push
-                      #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+          #pragma clang diagnostic push
+          #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                       [mgr performSelector:sel withObject:root];
-                      #pragma clang diagnostic pop
+          #pragma clang diagnostic pop
                       NSLog(@"[Loader v2] invoked %@ with root", name);
                       return;
                   }
@@ -176,15 +195,16 @@ jobs:
                       void *h = dlopen(p.UTF8String, RTLD_NOW | RTLD_LOCAL);
                       if (!h) { NSLog(@"[Loader v2] dlopen FLEX failed at %@: %s", p, dlerror()); continue; }
                       NSLog(@"[Loader v2] dlopen OK: %@", p);
+
                       Class FlexMgr = NSClassFromString(@"FLEXManager");
                       if (FlexMgr && [FlexMgr respondsToSelector:@selector(sharedManager)]) {
-                          #pragma clang diagnostic push
-                          #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+          #pragma clang diagnostic push
+          #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                           id mgr = [FlexMgr performSelector:@selector(sharedManager)];
-                          #pragma clang diagnostic pop
+          #pragma clang diagnostic pop
                           presentExplorerWithManager(mgr);
                           dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
-                                         dispatch_get_main_queue(), try_logAuthToken_with_retries);
+                                         dispatch_get_main_queue(), ^{ try_logAuthToken_with_retries(); });
                           return;
                       }
                       NSLog(@"[Loader v2] FLEXManager not found after dlopen");
@@ -215,6 +235,14 @@ jobs:
           }
           @end
           EOF
+
+      # Safety patch: if any stray function-pointer call slipped in, replace it.
+      - name: Guard patch (ensure blocks used)
+        run: |
+          perl -0777 -pe "s/dispatch_after\([^;]+,\s*dispatch_get_main_queue\(\),\s*try_logAuthToken_with_retries\);/dispatch_after\(dispatch_time\(DISPATCH_TIME_NOW,\(int64_t\)\(500\*NSEC_PER_MSEC\)\), dispatch_get_main_queue\(\), ^\{ try_logAuthToken_with_retries\(\); \}\);/g" \
+            -i loader-src/loader.m
+          echo "----- VERIFY offending pattern is gone -----"
+          ! grep -n "dispatch_get_main_queue(), try_logAuthToken_with_retries" loader-src/loader.m || { echo "STILL PRESENT"; exit 1; }
 
       - name: Show toolchain
         run: |
