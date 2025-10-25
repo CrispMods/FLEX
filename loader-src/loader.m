@@ -28,6 +28,27 @@ static void* sym(const char* s) {
     return p;
 }
 
+#pragma mark - UIWindow / root VC helper (scene-safe)
+
+static UIWindow *LF_mainWindow(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive &&
+                [scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    if (w.isKeyWindow) return w;
+                }
+            }
+        }
+        return UIApplication.sharedApplication.windows.firstObject;
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        return UIApplication.sharedApplication.keyWindow ?: UIApplication.sharedApplication.windows.firstObject;
+#pragma clang diagnostic pop
+    }
+}
+
 #pragma mark - Auth token reader (very verbose)
 
 static BOOL logAuthToken_once(void) {
@@ -44,7 +65,8 @@ static BOOL logAuthToken_once(void) {
     t_il2cpp_string_length              il2cpp_string_length              = (t_il2cpp_string_length)             sym("il2cpp_string_length");
 
     if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies) {
-        NSLog(@"[Loader v2] il2cpp symbols missing (domain_get / get_assemblies)"); return NO;
+        NSLog(@"[Loader v2] il2cpp symbols missing (domain_get / get_assemblies)");
+        return NO;
     }
 
     void* domain = il2cpp_domain_get();
@@ -131,7 +153,9 @@ static void try_logAuthToken_with_retries(void) {
         }
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), tick);
+                   dispatch_get_main_queue(), ^{
+        tick();
+    });
 }
 
 #pragma mark - FLEX helpers (verbose)
@@ -152,7 +176,7 @@ static void presentExplorerWithManager(id mgr) {
             return;
         }
     }
-    UIWindow *win = UIApplication.sharedApplication.keyWindow ?: UIApplication.sharedApplication.windows.firstObject;
+    UIWindow *win = LF_mainWindow();
     UIViewController *root = win.rootViewController ?: [UIViewController new];
     for (NSString *name in oneArg) {
         SEL sel = NSSelectorFromString(name);
@@ -190,7 +214,7 @@ static void tryLoadAndPresentFLEX(void) {
 #pragma clang diagnostic pop
                 presentExplorerWithManager(mgr);
 
-                // FIX: dispatch_after expects a block, not a function pointer.
+                // Use a block here (this was the build error).
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
                                dispatch_get_main_queue(), ^{
                     try_logAuthToken_with_retries();
