@@ -14,17 +14,24 @@ typedef void*   (*t_il2cpp_runtime_invoke)(void* method, void* obj, void** param
 typedef const uint16_t* (*t_il2cpp_string_chars)(void* il2cppStr);
 typedef int32_t (*t_il2cpp_string_length)(void* il2cppStr);
 
+// NEW: thread attach/detach + optional assembly open
+typedef void*   (*t_il2cpp_thread_attach)(void* domain);
+typedef void    (*t_il2cpp_thread_detach)(void* thread);
+typedef void*   (*t_il2cpp_domain_assembly_open)(void* domain, const char* name); // may be NULL on some builds
+
 #pragma mark - dlsym helper
 
 static void* sym(const char* s) {
+    // ensure UnityFramework is global so symbols resolve from all images
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("@rpath/UnityFramework.framework/UnityFramework", RTLD_NOW | RTLD_GLOBAL);
+        if (!h) h = dlopen("/System/Library/Frameworks/UnityFramework.framework/UnityFramework", RTLD_NOW | RTLD_GLOBAL);
+        NSLog(@"[Loader v3] dlopen UnityFramework -> %p (%s)", h, h ? "OK" : dlerror());
+    });
+
     void *p = dlsym(RTLD_DEFAULT, s);
-    if (!p) {
-        NSLog(@"[Loader v2] dlsym('%s') miss -> dlopen UnityFramework", s);
-        void *hf = dlopen("@rpath/UnityFramework.framework/UnityFramework", RTLD_NOW | RTLD_LOCAL);
-        if (!hf) hf = dlopen("/System/Library/Frameworks/UnityFramework.framework/UnityFramework", RTLD_NOW | RTLD_LOCAL);
-        p = dlsym(RTLD_DEFAULT, s);
-    }
-    if (!p) NSLog(@"[Loader v2] dlsym('%s') still NULL", s);
+    if (!p) NSLog(@"[Loader v3] dlsym('%s') = NULL", s);
     return p;
 }
 
@@ -49,10 +56,10 @@ static UIWindow *LF_mainWindow(void) {
     }
 }
 
-#pragma mark - Auth token reader (very verbose)
+#pragma mark - Auth token reader
 
 static BOOL logAuthToken_once(void) {
-    NSLog(@"[Loader v2] ===== logAuthToken_once() =====");
+    NSLog(@"[Loader v3] ===== logAuthToken_once() =====");
 
     t_il2cpp_domain_get                 il2cpp_domain_get                 = (t_il2cpp_domain_get)                sym("il2cpp_domain_get");
     t_il2cpp_domain_get_assemblies      il2cpp_domain_get_assemblies      = (t_il2cpp_domain_get_assemblies)     sym("il2cpp_domain_get_assemblies");
@@ -63,75 +70,99 @@ static BOOL logAuthToken_once(void) {
     t_il2cpp_runtime_invoke             il2cpp_runtime_invoke             = (t_il2cpp_runtime_invoke)            sym("il2cpp_runtime_invoke");
     t_il2cpp_string_chars               il2cpp_string_chars               = (t_il2cpp_string_chars)              sym("il2cpp_string_chars");
     t_il2cpp_string_length              il2cpp_string_length              = (t_il2cpp_string_length)             sym("il2cpp_string_length");
+    t_il2cpp_thread_attach              il2cpp_thread_attach              = (t_il2cpp_thread_attach)             sym("il2cpp_thread_attach");
+    t_il2cpp_thread_detach              il2cpp_thread_detach              = (t_il2cpp_thread_detach)             sym("il2cpp_thread_detach");
+    t_il2cpp_domain_assembly_open       il2cpp_domain_assembly_open       = (t_il2cpp_domain_assembly_open)      sym("il2cpp_domain_assembly_open"); // optional
 
     if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies) {
-        NSLog(@"[Loader v2] il2cpp symbols missing (domain_get / get_assemblies)");
+        NSLog(@"[Loader v3] missing core IL2CPP symbols");
         return NO;
     }
 
     void* domain = il2cpp_domain_get();
-    if (!domain) { NSLog(@"[Loader v2] il2cpp_domain_get() NULL"); return NO; }
+    if (!domain) { NSLog(@"[Loader v3] il2cpp_domain_get() NULL"); return NO; }
+
+    // attach this thread to IL2CPP VM (required)
+    void* attached = NULL;
+    if (il2cpp_thread_attach) {
+        attached = il2cpp_thread_attach(domain);
+        NSLog(@"[Loader v3] il2cpp_thread_attach -> %p", attached);
+    }
 
     const void** assemblies = NULL; size_t count = 0;
     il2cpp_domain_get_assemblies(domain, &assemblies, &count);
-    NSLog(@"[Loader v2] assemblies count = %zu", count);
-    if (!assemblies || count == 0) { NSLog(@"[Loader v2] no assemblies yet"); return NO; }
+    NSLog(@"[Loader v3] assemblies count = %zu ptr=%p", count, assemblies);
 
-    for (size_t i = 0; i < count && i < 8; i++) {
-        void* img_i = il2cpp_assembly_get_image((void*)assemblies[i]);
-        const char* nm_i = img_i ? il2cpp_image_get_name(img_i) : "(null)";
-        NSLog(@"[Loader v2] asm[%zu] = %s", i, nm_i ?: "(null)");
+    // try to force-load Nakama if list is empty in this frame
+    if ((count == 0 || !assemblies) && il2cpp_domain_assembly_open) {
+        void* a = il2cpp_domain_assembly_open(domain, "Nakama.dll");
+        NSLog(@"[Loader v3] domain_assembly_open(\"Nakama.dll\") -> %p", a);
+        il2cpp_domain_get_assemblies(domain, &assemblies, &count);
+        NSLog(@"[Loader v3] assemblies count after open = %zu", count);
     }
 
-    // Find Nakama image
+    if (!assemblies || count == 0) {
+        NSLog(@"[Loader v3] no assemblies yet");
+        if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached);
+        return NO;
+    }
+
+    for (size_t i = 0; i < count && i < 12; i++) {
+        void* img = il2cpp_assembly_get_image((void*)assemblies[i]);
+        const char* nm = img ? il2cpp_image_get_name(img) : "(null)";
+        NSLog(@"[Loader v3] asm[%zu] image=%p name=%s", i, img, nm ?: "(null)");
+    }
+
+    // find Nakama image
     void* nakamaImage = NULL;
     for (size_t i = 0; i < count; i++) {
         void* img = il2cpp_assembly_get_image((void*)assemblies[i]);
         const char* name = img ? il2cpp_image_get_name(img) : NULL;
         if (name && (strstr(name, "Nakama.dll") || strstr(name, "Nakama"))) {
-            nakamaImage = img; NSLog(@"[Loader v2] found image: %s", name); break;
+            nakamaImage = img;
+            NSLog(@"[Loader v3] found image: %s", name);
+            break;
         }
     }
-    if (!nakamaImage) { NSLog(@"[Loader v2] Nakama image not loaded yet"); return NO; }
+    if (!nakamaImage) { NSLog(@"[Loader v3] Nakama image not loaded yet"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
 
     // Client.get_Instance()
     void* clientKlass = il2cpp_class_from_name(nakamaImage, "Nakama", "Client");
-    if (!clientKlass) { NSLog(@"[Loader v2] Nakama.Client class not found"); return NO; }
+    if (!clientKlass) { NSLog(@"[Loader v3] Nakama.Client not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
     void* m_getInstance = il2cpp_class_get_method_from_name(clientKlass, "get_Instance", 0);
-    if (!m_getInstance){ NSLog(@"[Loader v2] get_Instance not found"); return NO; }
+    if (!m_getInstance){ NSLog(@"[Loader v3] get_Instance not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
     void* exc = NULL;
     void* clientSingleton = il2cpp_runtime_invoke(m_getInstance, NULL, NULL, &exc);
-    if (exc) NSLog(@"[Loader v2] get_Instance exception=%p", exc);
-    if (!clientSingleton){ NSLog(@"[Loader v2] Client.Instance NULL"); return NO; }
-    NSLog(@"[Loader v2] Client.Instance = %p", clientSingleton);
+    if (!clientSingleton){ NSLog(@"[Loader v3] Client.Instance NULL (exc=%p)", exc); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
 
     // Client.get_Session()
     void* m_getSession = il2cpp_class_get_method_from_name(clientKlass, "get_Session", 0);
-    if (!m_getSession){ NSLog(@"[Loader v2] get_Session not found"); return NO; }
+    if (!m_getSession){ NSLog(@"[Loader v3] get_Session not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
     void* sessionObj = il2cpp_runtime_invoke(m_getSession, clientSingleton, NULL, &exc);
-    if (exc) NSLog(@"[Loader v2] get_Session exception=%p", exc);
-    if (!sessionObj){ NSLog(@"[Loader v2] Session NULL"); return NO; }
-    NSLog(@"[Loader v2] Session obj = %p", sessionObj);
+    if (!sessionObj){ NSLog(@"[Loader v3] Session NULL (exc=%p)", exc); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
 
     // Session.get_AuthToken()
     void* sessionKlass = il2cpp_class_from_name(nakamaImage, "Nakama", "Session");
-    if (!sessionKlass){ NSLog(@"[Loader v2] Nakama.Session class not found"); return NO; }
+    if (!sessionKlass){ NSLog(@"[Loader v3] Nakama.Session not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
     void* m_getAuth = il2cpp_class_get_method_from_name(sessionKlass, "get_AuthToken", 0);
-    if (!m_getAuth){ NSLog(@"[Loader v2] get_AuthToken not found"); return NO; }
+    if (!m_getAuth){ NSLog(@"[Loader v3] get_AuthToken not found"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
     void* tokenStr = il2cpp_runtime_invoke(m_getAuth, sessionObj, NULL, &exc);
-    if (exc) NSLog(@"[Loader v2] get_AuthToken exception=%p", exc);
-    if (!tokenStr){ NSLog(@"[Loader v2] AuthToken returned NULL"); return NO; }
+    if (!tokenStr){ NSLog(@"[Loader v3] AuthToken returned NULL (exc=%p)", exc); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
 
     if (!il2cpp_string_chars || !il2cpp_string_length) {
-        NSLog(@"[Loader v2] il2cpp_string_* missing"); return NO;
+        NSLog(@"[Loader v3] il2cpp_string_* missing");
+        if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached);
+        return NO;
     }
     const uint16_t* w = il2cpp_string_chars(tokenStr);
     int32_t len = il2cpp_string_length(tokenStr);
-    NSLog(@"[Loader v2] token Il2CppString len=%d chars_ptr=%p", len, w);
-    if (!w || len <= 0) { NSLog(@"[Loader v2] token empty"); return NO; }
+    NSLog(@"[Loader v3] token Il2CppString len=%d chars_ptr=%p", len, w);
+    if (!w || len <= 0) { NSLog(@"[Loader v3] token empty"); if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached); return NO; }
 
     NSString *ns = [NSString stringWithCharacters:(unichar*)w length:(NSUInteger)len];
-    NSLog(@"[Loader v2] Nakama Session AuthToken = %@", ns);
+    NSLog(@"[Loader v3] Nakama Session AuthToken = %@", ns);
+
+    if (il2cpp_thread_detach && attached) il2cpp_thread_detach(attached);
     return YES;
 }
 
@@ -140,26 +171,25 @@ static void try_logAuthToken_with_retries(void) {
     __block void (^tick)(void);
     tick = ^{
         attempts++;
-        NSLog(@"[Loader v2] AuthToken attempt %d", attempts);
+        NSLog(@"[Loader v3] AuthToken attempt %d", attempts);
         if (logAuthToken_once()) {
-            NSLog(@"[Loader v2] AuthToken read OK");
+            NSLog(@"[Loader v3] AuthToken read OK");
             return;
         }
-        if (attempts < 180) { // 3 minutes @ 1s
+        if (attempts < 180) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), tick);
         } else {
-            NSLog(@"[Loader v2] gave up after %d attempts", attempts);
+            NSLog(@"[Loader v3] gave up after %d attempts", attempts);
         }
     };
-    // Start AFTER a warm-up; actual delay scheduling is done by callers.
-    tick();
+    tick(); // start immediately; caller controls initial warm-up via dispatch_after
 }
 
-#pragma mark - FLEX helpers (verbose)
+#pragma mark - FLEX helpers
 
 static void presentExplorerWithManager(id mgr) {
-    if (!mgr) { NSLog(@"[Loader v2] FLEXManager nil"); return; }
+    if (!mgr) { NSLog(@"[Loader v3] FLEXManager nil"); return; }
     NSArray<NSString *> *noArg = @[@"showExplorer", @"toggleExplorer", @"presentExplorer", @"show"];
     NSArray<NSString *> *oneArg = @[@"showExplorerFromRootViewController:", @"presentExplorerAnimated:"];
 
@@ -170,7 +200,7 @@ static void presentExplorerWithManager(id mgr) {
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [mgr performSelector:sel];
 #pragma clang diagnostic pop
-            NSLog(@"[Loader v2] invoked %@", name);
+            NSLog(@"[Loader v3] invoked %@", name);
             return;
         }
     }
@@ -183,11 +213,11 @@ static void presentExplorerWithManager(id mgr) {
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [mgr performSelector:sel withObject:root];
 #pragma clang diagnostic pop
-            NSLog(@"[Loader v2] invoked %@ with root", name);
+            NSLog(@"[Loader v3] invoked %@ with root", name);
             return;
         }
     }
-    NSLog(@"[Loader v2] FLEX presenter not found");
+    NSLog(@"[Loader v3] FLEX presenter not found");
 }
 
 static void tryLoadAndPresentFLEX(void) {
@@ -199,10 +229,10 @@ static void tryLoadAndPresentFLEX(void) {
         ];
         for (NSString *p in paths) {
             if (!p) continue;
-            if (![[NSFileManager defaultManager] fileExistsAtPath:p]) { NSLog(@"[Loader v2] FLEX not at %@", p); continue; }
+            if (![[NSFileManager defaultManager] fileExistsAtPath:p]) { NSLog(@"[Loader v3] FLEX not at %@", p); continue; }
             void *h = dlopen(p.UTF8String, RTLD_NOW | RTLD_LOCAL);
-            if (!h) { NSLog(@"[Loader v2] dlopen FLEX failed at %@: %s", p, dlerror()); continue; }
-            NSLog(@"[Loader v2] dlopen OK: %@", p);
+            if (!h) { NSLog(@"[Loader v3] dlopen FLEX failed at %@: %s", p, dlerror()); continue; }
+            NSLog(@"[Loader v3] dlopen OK: %@", p);
 
             Class FlexMgr = NSClassFromString(@"FLEXManager");
             if (FlexMgr && [FlexMgr respondsToSelector:@selector(sharedManager)]) {
@@ -212,31 +242,41 @@ static void tryLoadAndPresentFLEX(void) {
 #pragma clang diagnostic pop
                 presentExplorerWithManager(mgr);
 
-                // Start token attempts after a half-second, PLUS a 10s warm-up below.
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
+                // kick off token loop after a warm-up
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        try_logAuthToken_with_retries();
-                    });
+                    try_logAuthToken_with_retries();
                 });
                 return;
             }
-            NSLog(@"[Loader v2] FLEXManager not found after dlopen");
+            NSLog(@"[Loader v3] FLEXManager not found after dlopen");
         }
-        NSLog(@"[Loader v2] FLEX framework not found anywhere");
+        NSLog(@"[Loader v3] FLEX framework not found anywhere");
     });
 }
 
-#pragma mark - Entry points (two of them)
+#pragma mark - Entry points
 
 __attribute__((constructor))
 static void loader_constructor() {
-    NSLog(@"[Loader v2] C constructor hit");
+    NSLog(@"[Loader v3] C constructor hit");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         sleep(1);
         tryLoadAndPresentFLEX();
-        // 10s warm-up before starting token loop (Unity needs to finish loading)
+
+        // also retry when app becomes active (Unity scene ready)
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(__unused NSNotification *n) {
+            NSLog(@"[Loader v3] UIApplicationDidBecomeActive -> start token attempts");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                try_logAuthToken_with_retries();
+            });
+        }];
+
+        // fallback warm-up start
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             try_logAuthToken_with_retries();
@@ -244,11 +284,11 @@ static void loader_constructor() {
     });
 }
 
-// Obj-C +load sometimes fires in cases where the constructor is skipped
+// backup entrypoint in case constructor is skipped
 @interface _LoaderBootstrap : NSObject @end
 @implementation _LoaderBootstrap
 + (void)load {
-    NSLog(@"[Loader v2] +load fired");
+    NSLog(@"[Loader v3] +load fired");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         tryLoadAndPresentFLEX();
