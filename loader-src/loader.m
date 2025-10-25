@@ -145,17 +145,15 @@ static void try_logAuthToken_with_retries(void) {
             NSLog(@"[Loader v2] AuthToken read OK");
             return;
         }
-        if (attempts < 60) { // ~60s
+        if (attempts < 180) { // 3 minutes @ 1s
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), tick);
         } else {
             NSLog(@"[Loader v2] gave up after %d attempts", attempts);
         }
     };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        tick();
-    });
+    // Start AFTER a warm-up; actual delay scheduling is done by callers.
+    tick();
 }
 
 #pragma mark - FLEX helpers (verbose)
@@ -214,10 +212,13 @@ static void tryLoadAndPresentFLEX(void) {
 #pragma clang diagnostic pop
                 presentExplorerWithManager(mgr);
 
-                // Use a block here (this was the build error).
+                // Start token attempts after a half-second, PLUS a 10s warm-up below.
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
                                dispatch_get_main_queue(), ^{
-                    try_logAuthToken_with_retries();
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        try_logAuthToken_with_retries();
+                    });
                 });
                 return;
             }
@@ -235,7 +236,11 @@ static void loader_constructor() {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         sleep(1);
         tryLoadAndPresentFLEX();
-        try_logAuthToken_with_retries();
+        // 10s warm-up before starting token loop (Unity needs to finish loading)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            try_logAuthToken_with_retries();
+        });
     });
 }
 
@@ -247,7 +252,10 @@ static void loader_constructor() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         tryLoadAndPresentFLEX();
-        try_logAuthToken_with_retries();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            try_logAuthToken_with_retries();
+        });
     });
 }
 @end

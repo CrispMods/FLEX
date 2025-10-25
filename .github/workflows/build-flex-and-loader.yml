@@ -139,15 +139,14 @@ jobs:
                   attempts++;
                   NSLog(@"[Loader v2] AuthToken attempt %d", attempts);
                   if (logAuthToken_once()) { NSLog(@"[Loader v2] AuthToken read OK"); return; }
-                  if (attempts < 60) {
+                  if (attempts < 180) {
                       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                                      dispatch_get_main_queue(), tick);
                   } else {
                       NSLog(@"[Loader v2] gave up after %d attempts", attempts);
                   }
               };
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                             dispatch_get_main_queue(), ^{ tick(); });
+              tick(); // caller decides when to start (after warm-up)
           }
 
           static void presentExplorerWithManager(id mgr) {
@@ -203,8 +202,15 @@ jobs:
                           id mgr = [FlexMgr performSelector:@selector(sharedManager)];
           #pragma clang diagnostic pop
                           presentExplorerWithManager(mgr);
+
+                          // Half-second + 10s warm-up, then start token loop
                           dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
-                                         dispatch_get_main_queue(), ^{ try_logAuthToken_with_retries(); });
+                                         dispatch_get_main_queue(), ^{
+                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                                             dispatch_get_main_queue(), ^{
+                                  try_logAuthToken_with_retries();
+                              });
+                          });
                           return;
                       }
                       NSLog(@"[Loader v2] FLEXManager not found after dlopen");
@@ -219,7 +225,10 @@ jobs:
               dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                   sleep(1);
                   tryLoadAndPresentFLEX();
-                  try_logAuthToken_with_retries();
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                                 dispatch_get_main_queue(), ^{
+                      try_logAuthToken_with_retries();
+                  });
               });
           }
 
@@ -230,19 +239,14 @@ jobs:
               dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                              dispatch_get_main_queue(), ^{
                   tryLoadAndPresentFLEX();
-                  try_logAuthToken_with_retries();
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                                 dispatch_get_main_queue(), ^{
+                      try_logAuthToken_with_retries();
+                  });
               });
           }
           @end
           EOF
-
-      # Safety patch: if any stray function-pointer call slipped in, replace it.
-      - name: Guard patch (ensure blocks used)
-        run: |
-          perl -0777 -pe "s/dispatch_after\([^;]+,\s*dispatch_get_main_queue\(\),\s*try_logAuthToken_with_retries\);/dispatch_after\(dispatch_time\(DISPATCH_TIME_NOW,\(int64_t\)\(500\*NSEC_PER_MSEC\)\), dispatch_get_main_queue\(\), ^\{ try_logAuthToken_with_retries\(\); \}\);/g" \
-            -i loader-src/loader.m
-          echo "----- VERIFY offending pattern is gone -----"
-          ! grep -n "dispatch_get_main_queue(), try_logAuthToken_with_retries" loader-src/loader.m || { echo "STILL PRESENT"; exit 1; }
 
       - name: Show toolchain
         run: |
